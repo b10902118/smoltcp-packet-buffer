@@ -1,0 +1,19 @@
+[package]
+name = "smoltcp-packet-buffer-verification"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "0BSD"
+publish = false
+
+[dependencies]
+managed = { version = "0.8", default-features = false }
+defmt = { version = "1", optional = true }
+
+[features]
+default = ["std"]
+std = ["managed/std", "alloc"]
+alloc = ["managed/alloc", "defmt?/alloc"]
+
+# Keep this crate independent of the surrounding project.
+[workspace]
