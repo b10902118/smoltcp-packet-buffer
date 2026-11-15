@@ -1,6 +1,6 @@
 # Extracted Packet Buffer
 
-This independent crate contains the original `PacketBuffer` and `RingBuffer` implementations. It does not depend on smoltcp, compile its networking modules, or run its build script. No Flux annotations or proofs have been added yet.
+This independent crate contains the original `PacketBuffer` and `RingBuffer` implementations. It does not depend on smoltcp, compile its networking modules, or run its build script. The Flux-annotated version is in `flux_annotations/`.
 
 ### Build
 
@@ -14,8 +14,11 @@ Install flux globally (recommended because it needs to match your rust version)
 https://flux-rs.github.io/flux/guide/install.html
 
 ```sh
+cd flux_annotations
 cargo flux
 ```
+
+See `flux_annotations/flux_lessons_learned.md` for results and `flux_annotations/injected_bug_tests.md` for injected-bug testing.
 
 ### Verus
 

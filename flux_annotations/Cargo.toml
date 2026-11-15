@@ -22,8 +22,6 @@ alloc = ["managed/alloc", "defmt?/alloc"]
 
 [package.metadata.flux]
 enabled = true
-# `flux_specs.rs` is left out: checking its opaque-struct spec of the
-# `ManagedSlice` enum makes Flux ICE ("expected enum"). Its specs still apply.
 include = ["src/storage/packet_buffer.rs", "src/storage/ring_buffer.rs"]
 
 # Keep this crate independent of the surrounding project.
