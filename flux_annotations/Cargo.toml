@@ -1,0 +1,30 @@
+[package]
+name = "smoltcp-packet-buffer-flux"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "0BSD"
+publish = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(flux)'] }
+
+[dependencies]
+flux-rs = { git = "https://github.com/flux-rs/flux.git", rev = "9fe62fab121a3b26f2fb4ffdf8fb39e44904e3c2" }
+flux-core = { git = "https://github.com/flux-rs/flux.git", rev = "9fe62fab121a3b26f2fb4ffdf8fb39e44904e3c2" }
+managed = { version = "0.8", default-features = false }
+defmt = { version = "1", optional = true }
+
+[features]
+default = ["std"]
+std = ["managed/std", "alloc"]
+alloc = ["managed/alloc", "defmt?/alloc"]
+
+[package.metadata.flux]
+enabled = true
+# `flux_specs.rs` is left out: checking its opaque-struct spec of the
+# `ManagedSlice` enum makes Flux ICE ("expected enum"). Its specs still apply.
+include = ["src/storage/packet_buffer.rs", "src/storage/ring_buffer.rs"]
+
+# Keep this crate independent of the surrounding project.
+[workspace]
