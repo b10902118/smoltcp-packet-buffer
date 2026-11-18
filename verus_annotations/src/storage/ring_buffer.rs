@@ -9,6 +9,31 @@ use crate::storage::Resettable;
 
 use super::{Empty, Full};
 
+use vstd::prelude::*;
+
+verus! {
+
+/// `x % m` for `0 <= x < 2m`, without nonlinear arithmetic.
+proof fn lemma_mod_2m(x: int, m: int)
+    requires
+        0 < m,
+        0 <= x < 2 * m,
+    ensures
+        x % m == if x < m { x } else { x - m },
+{
+    if x < m {
+        vstd::arithmetic::div_mod::lemma_small_mod(x as nat, m as nat);
+    } else {
+        vstd::arithmetic::div_mod::lemma_small_mod((x - m) as nat, m as nat);
+        vstd::arithmetic::div_mod::lemma_mod_sub_multiples_vanish(x, m);
+    }
+}
+
+/// Rotate `s` left by `k`: the first `k` elements move to the back.
+pub open spec fn rotate<A>(s: Seq<A>, k: int) -> Seq<A> {
+    s.skip(k) + s.take(k)
+}
+
 /// A ring buffer.
 ///
 /// This ring buffer implementation provides many ways to interact with it:
@@ -30,74 +55,237 @@ pub struct RingBuffer<'a, T: 'a> {
     length: usize,
 }
 
+// ---------------------------------------------------------------------------
+// Specification
+// ---------------------------------------------------------------------------
+impl<'a, T: 'a> RingBuffer<'a, T> {
+    /// Number of slots in the backing storage.
+    pub closed spec fn cap(&self) -> nat {
+        self.storage@.len()
+    }
+
+    /// Physical storage index of ring position `i` (for `0 <= i <= cap`).
+    /// This is `(read_at + i) % cap`, written without `%`.
+    pub closed spec fn phys(&self, i: int) -> int {
+        if self.read_at + i < self.cap() {
+            self.read_at + i
+        } else {
+            self.read_at + i - self.cap() //what if read_at is two times of self.cap()
+        }
+    }
+
+    /// Every slot, starting at the read pointer: positions `[0, len)` are the
+    /// queued elements, positions `[len, cap)` are the free (unallocated) slots.
+    pub closed spec fn ring(&self) -> Seq<T> {
+        Seq::new(self.cap(), |i: int| self.storage@[self.phys(i)])
+    }
+
+    /// The queue contents, oldest first.
+    pub closed spec fn view(&self) -> Seq<T> {
+        Seq::new(self.length as nat, |i: int| self.storage@[self.phys(i)])
+    }
+
+    /// Well-formedness invariant.
+    pub closed spec fn wf(&self) -> bool {
+        &&& self.length <= self.cap()
+        &&& if self.cap() == 0 { self.read_at == 0 } else { self.read_at < self.cap() }
+        // Rust guarantees this for every non-zero-sized `T`; see `new`.
+        &&& self.cap() <= isize::MAX
+    }
+
+    /// What `contiguous_window` returns: free slots after the tail before the
+    /// storage wraps around.
+    pub closed spec fn contig_free(&self) -> nat {
+        if self.cap() == 0 {
+            0
+        } else {
+            let a = (self.cap() - self.length) as nat;
+            let b = (self.cap() - self.phys(self.length as int)) as nat;
+            if a < b { a } else { b }
+        }
+    }
+
+    /// Facts about the specification that clients can use.
+    pub proof fn lemma_wf(&self)
+        requires
+            self.wf(),
+        ensures
+            self.view().len() <= self.cap(),
+            self.ring().len() == self.cap(),
+            self.view() == self.ring().take(self.view().len() as int),
+            self.contig_free() <= self.cap() - self.view().len(),
+    {
+        assert(self.view() =~= self.ring().take(self.view().len() as int));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Core state
+// ---------------------------------------------------------------------------
 impl<'a, T: 'a> RingBuffer<'a, T> {
     /// Create a ring buffer with the given storage.
     ///
     /// During creation, every element in `storage` is reset.
-    pub fn new<S>(storage: S) -> RingBuffer<'a, T>
+    ///
+    /// Verifies: the new buffer is well-formed and empty.
+    pub fn new<S>(storage: S) -> (r: RingBuffer<'a, T>)
     where
         S: Into<ManagedSlice<'a, T>>,
+        ensures
+            r.wf(),
+            r.view() == Seq::<T>::empty(),
     {
-        RingBuffer {
+        let r = RingBuffer {
             storage: storage.into(),
             read_at: 0,
             length: 0,
+        };
+        proof {
+            // TRUSTED (the only assumption in this file): a slice of a
+            // non-zero-sized `T` has at most `isize::MAX` elements. Verus has no
+            // axiom for this. It is false only for zero-sized `T` with more than
+            // `isize::MAX` slots, where `read_at + length` can overflow.
+            assume(r.storage@.len() <= isize::MAX);
         }
+        assert(r.view() =~= Seq::<T>::empty());
+        r
     }
 
     /// Clear the ring buffer.
-    pub fn clear(&mut self) {
+    ///
+    /// Verifies: the buffer becomes empty, capacity is unchanged.
+    pub fn clear(&mut self)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).cap() == old(self).cap(),
+            final(self).view() == Seq::<T>::empty(),
+    {
         self.read_at = 0;
         self.length = 0;
+        assert(self.view() =~= Seq::<T>::empty());
     }
 
     /// Return the maximum number of elements in the ring buffer.
-    pub fn capacity(&self) -> usize {
-        self.storage.len()
+    ///
+    /// Verifies: returns the number of slots.
+    pub fn capacity(&self) -> (r: usize)
+        ensures
+            r == self.cap(),
+    {
+        self.storage.as_slice().len()
     }
 
     /// Clear the ring buffer, and reset every element.
+    ///
+    /// Verifies: the buffer becomes empty, capacity is unchanged.
+    /// (Port note: upstream uses `iter_mut()`; this is the same loop by index.)
     pub fn reset(&mut self)
     where
         T: Resettable,
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).cap() == old(self).cap(),
+            final(self).view() == Seq::<T>::empty(),
     {
         self.clear();
-        for elem in self.storage.iter_mut() {
-            elem.reset();
+        let storage = self.storage.as_mut_slice();
+        let n = storage.len();
+        let mut i: usize = 0;
+        while i < n
+            invariant
+                n == storage@.len(),
+                i <= n,
+            decreases n - i,
+        {
+            storage[i].reset();
+            i += 1;
         }
     }
 
     /// Return the current number of elements in the ring buffer.
-    pub fn len(&self) -> usize {
+    ///
+    /// Verifies: returns the queue length.
+    pub fn len(&self) -> (r: usize)
+        ensures
+            r == self.view().len(),
+    {
         self.length
     }
 
     /// Return the number of elements that can be added to the ring buffer.
-    pub fn window(&self) -> usize {
+    ///
+    /// Verifies: returns the number of free slots (no underflow).
+    pub fn window(&self) -> (r: usize)
+        requires
+            self.wf(),
+        ensures
+            r == self.cap() - self.view().len(),
+    {
         self.capacity() - self.len()
     }
 
     /// Return the largest number of elements that can be added to the buffer
     /// without wrapping around (i.e. in a single `enqueue_many` call).
-    pub fn contiguous_window(&self) -> usize {
+    ///
+    /// Verifies: returns `contig_free()`, which is at most `window()`.
+    pub fn contiguous_window(&self) -> (r: usize)
+        requires
+            self.wf(),
+        ensures
+            r == self.contig_free(),
+            r <= self.cap() - self.view().len(),
+    {
         cmp::min(self.window(), self.capacity() - self.get_idx(self.length))
     }
 
     /// Query whether the buffer is empty.
-    pub fn is_empty(&self) -> bool {
+    ///
+    /// Verifies: true iff the queue is empty.
+    pub fn is_empty(&self) -> (r: bool)
+        ensures
+            r == (self.view().len() == 0),
+    {
         self.len() == 0
     }
 
     /// Query whether the buffer is full.
-    pub fn is_full(&self) -> bool {
+    ///
+    /// Verifies: true iff every slot is in use.
+    pub fn is_full(&self) -> (r: bool)
+        requires
+            self.wf(),
+        ensures
+            r == (self.view().len() == self.cap()),
+    {
         self.window() == 0
     }
 
     /// Shorthand for `(self.read + idx) % self.capacity()` with an
     /// additional check to ensure that the capacity is not zero.
-    fn get_idx(&self, idx: usize) -> usize {
+    ///
+    /// Verifies: no overflow or division by zero; for `idx <= cap` the result
+    /// is the physical index of ring position `idx`.
+    fn get_idx(&self, idx: usize) -> (r: usize)
+        requires
+            self.wf(),
+            self.read_at + idx <= usize::MAX,
+        ensures
+            self.cap() == 0 ==> r == 0,
+            self.cap() > 0 ==> r == (self.read_at + idx) % (self.cap() as int),
+            self.cap() > 0 ==> r < self.cap(),
+            self.cap() > 0 && idx <= self.cap() ==> r == self.phys(idx as int),
+    {
         let len = self.capacity();
         if len > 0 {
+            proof {
+                if idx <= len {
+                    lemma_mod_2m(self.read_at + idx, len as int);
+                }
+            }
             (self.read_at + idx) % len
         } else {
             0
@@ -105,27 +293,68 @@ impl<'a, T: 'a> RingBuffer<'a, T> {
     }
 
     /// Shorthand for `(self.read + idx) % self.capacity()` with no
-    /// additional checks to ensure the capacity is not zero.
-    fn get_idx_unchecked(&self, idx: usize) -> usize {
+    /// additional checks to ensure that the capacity is not zero.
+    ///
+    /// Verifies: the caller guarantees capacity > 0, so there is no division by
+    /// zero; the result is the physical index of ring position `idx`.
+    fn get_idx_unchecked(&self, idx: usize) -> (r: usize)
+        requires
+            self.wf(),
+            self.cap() > 0,
+            idx <= self.cap(),
+        ensures
+            r == self.phys(idx as int),
+            r < self.cap(),
+    {
+        proof {
+            lemma_mod_2m(self.read_at + idx, self.cap() as int);
+        }
         (self.read_at + idx) % self.capacity()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Discrete interface
+// ---------------------------------------------------------------------------
 
 /// This is the "discrete" ring buffer interface: it operates with single elements,
 /// and boundary conditions (empty/full) are errors.
 impl<'a, T: 'a> RingBuffer<'a, T> {
     /// Call `f` with a single buffer element, and enqueue the element if `f`
     /// returns successfully, or return `Err(Full)` if the buffer is full.
-    pub fn enqueue_one_with<'b, R, E, F>(&'b mut self, f: F) -> Result<Result<R, E>, Full>
+    ///
+    /// Verifies (indexing only): no overflow, out-of-bounds index, or division
+    /// by zero; if full, returns `Err(Full)` and the length is unchanged;
+    /// otherwise returns `Ok`, and the length grows by 1 iff `f` returned `Ok`.
+    /// Capacity never changes and the buffer stays well-formed.
+    pub fn enqueue_one_with<'b, R, E, F>(&'b mut self, f: F) -> (r: Result<Result<R, E>, Full>)
     where
         F: FnOnce(&'b mut T) -> Result<R, E>,
+        requires
+            old(self).wf(),
+            forall|e: &'b mut T| #[trigger] f.requires((e,)),
+        ensures
+            final(self).wf(),
+            final(self).cap() == old(self).cap(),
+            old(self).view().len() == old(self).cap() ==> {
+                &&& r is Err
+                &&& final(self).view().len() == old(self).view().len()
+            },
+            old(self).view().len() < old(self).cap() ==> {
+                &&& r is Ok
+                &&& final(self).view().len() == if r->Ok_0 is Ok {
+                    old(self).view().len() + 1
+                } else {
+                    old(self).view().len()
+                }
+            },
     {
         if self.is_full() {
             return Err(Full);
         }
 
         let index = self.get_idx_unchecked(self.length);
-        let res = f(&mut self.storage[index]);
+        let res = f(&mut self.storage.as_mut_slice()[index]); //verus can't use deref
         if res.is_ok() {
             self.length += 1;
         }
@@ -136,13 +365,19 @@ impl<'a, T: 'a> RingBuffer<'a, T> {
     /// or return `Err(Full)` if the buffer is full.
     ///
     /// This function is a shortcut for `ring_buf.enqueue_one_with(Ok)`.
+    #[verifier::external_body] // not yet verified
     pub fn enqueue_one(&mut self) -> Result<&mut T, Full> {
         self.enqueue_one_with(Ok)?
     }
 
     /// Call `f` with a single buffer element, and dequeue the element if `f`
     /// returns successfully, or return `Err(Empty)` if the buffer is empty.
-    pub fn dequeue_one_with<'b, R, E, F>(&'b mut self, f: F) -> Result<Result<R, E>, Empty>
+    ///
+    /// Verifies: if empty, nothing changes and `Err(Empty)` is returned.
+    /// Otherwise `f` gets the oldest element; it is popped iff `f` returned
+    /// `Ok`, and otherwise stays at the front with whatever `f` wrote to it.
+    #[verifier::external_body] // not yet verified
+    pub fn dequeue_one_with<'b, R, E, F>(&'b mut self, f: F) -> (r: Result<Result<R, E>, Empty>)
     where
         F: FnOnce(&'b mut T) -> Result<R, E>,
     {
@@ -164,10 +399,17 @@ impl<'a, T: 'a> RingBuffer<'a, T> {
     /// or return `Err(Empty)` if the buffer is empty.
     ///
     /// This function is a shortcut for `ring_buf.dequeue_one_with(Ok)`.
+    #[verifier::external_body] // not yet verified
     pub fn dequeue_one(&mut self) -> Result<&mut T, Empty> {
         self.dequeue_one_with(Ok)?
     }
 }
+
+} // verus!
+
+// ---------------------------------------------------------------------------
+// Not yet verified (stage 2): plain Rust.
+// ---------------------------------------------------------------------------
 
 /// This is the "continuous" ring buffer interface: it operates with element slices,
 /// and boundary conditions (empty/full) simply result in empty slices.

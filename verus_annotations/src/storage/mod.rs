@@ -11,6 +11,10 @@ mod ring_buffer;
 pub use self::packet_buffer::{PacketBuffer, PacketMetadata};
 pub use self::ring_buffer::RingBuffer;
 
+use vstd::prelude::*;
+
+verus! {
+
 /// A trait for setting a value to a known state.
 ///
 /// In-place analog of Default.
@@ -27,3 +31,5 @@ pub struct Full;
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Empty;
+
+} // verus!
